@@ -1,3 +1,5 @@
+import numpy as np
+import matplotlib.pyplot as plt
 import netsquid as ns
 from netsquid.nodes import Node
 from netsquid.components.models import FibreDelayModel
@@ -5,16 +7,14 @@ from netsquid.components.models.qerrormodels import DepolarNoiseModel
 from netsquid.components import QuantumChannel, ClassicalChannel
 from netsquid.nodes import DirectConnection
 from netsquid.protocols import NodeProtocol
-
 from netsquid.components import QuantumProcessor
 from netsquid.qubits import qubitapi as qapi
 
-
 from random_clifford_lib import *
 
+seed_rng = np.random.default_rng(None)
 
-
-class RemotePingPongProtocol(NodeProtocol):
+class RemoteBenchmarkingProtocol(NodeProtocol):
     def __init__(self, node):
         super().__init__(node)
         self.m = None
@@ -49,7 +49,7 @@ class RemotePingPongProtocol(NodeProtocol):
             self.clifford_list = None
 
 
-class LocalPingPongProtocol(NodeProtocol):
+class LocalBenchmarkingProtocol(NodeProtocol):
     def __init__(self, node, test_items):
         super().__init__(node)
 
@@ -68,12 +68,13 @@ class LocalPingPongProtocol(NodeProtocol):
             wrong = 0
 
             for cur_meas in range(tot_count):
-                local_seed = m*cur_meas
-                remote_seed = m*(tot_count + cur_meas)
-                random_clifford_set_seed(local_seed)
-                self.local_clifford_list = [get_random_clifford() for i in range(m)]
+                local_seed = seed_rng.integers(2**32, dtype=np.uint32)
+                remote_seed = seed_rng.integers(2**32, dtype=np.uint32)
                 random_clifford_set_seed(remote_seed)
                 self.remote_clifford_list = [get_random_clifford() for i in range(m)]
+                random_clifford_set_seed(local_seed)
+                self.local_clifford_list = [get_random_clifford() for i in range(m)]
+                
 
 
                 cmd = {"type": "CMD", 'm': m, 'seed': remote_seed}
@@ -121,8 +122,7 @@ class LocalPingPongProtocol(NodeProtocol):
                 else:
                     wrong += 1
             
-            print((m, tot, correct, wrong))
-            self.results.append([(m, tot, correct, wrong)])
+            self.results.append((m, tot, correct, wrong))
 
 
         
@@ -131,32 +131,48 @@ class LocalPingPongProtocol(NodeProtocol):
 
 
 
-loc_node = Node(name="loc_node")
-rem_node = Node(name="rem_node")
 
-distance = 2000 #km
-depolar_rate = 1 # Depolarization rate in Hz
-fibre_delay_model = FibreDelayModel()
-fibre_noise_model = DepolarNoiseModel(depolar_rate=depolar_rate)
-channel_1 = QuantumChannel("ch1", length=distance, models={"delay_model": fibre_delay_model, "quantum_noise_model": fibre_noise_model})
-channel_2 = QuantumChannel("ch2", length=distance, models={"delay_model": fibre_delay_model, "quantum_noise_model": fibre_noise_model})
+res_dict = {}
+
+for m in list(range(1, 10, 1)) + list(range(10, 101, 10)) + list(range(100, 1001, 100)):
+    print(m)
+    for _ in range(20 if m >= 1000 else 100 if m >= 100 else 1000):
+        loc_node = Node(name="loc_node")
+        rem_node = Node(name="rem_node")
+
+        distance = 100 #km
+        depolar_rate = 1 # Depolarization rate in Hz
+        fibre_delay_model = FibreDelayModel()
+        fibre_noise_model = DepolarNoiseModel(depolar_rate=depolar_rate)
+        channel_1 = QuantumChannel("ch1", length=distance, models={"delay_model": fibre_delay_model, "quantum_noise_model": fibre_noise_model})
+        channel_2 = QuantumChannel("ch2", length=distance, models={"delay_model": fibre_delay_model, "quantum_noise_model": fibre_noise_model})
 
 
-cmd_channel = ClassicalChannel("cl1", length=distance, models={"delay_model": fibre_delay_model})
-ack_channel = ClassicalChannel("cl1", length=distance, models={"delay_model": fibre_delay_model})
+        cmd_channel = ClassicalChannel("cl1", length=distance, models={"delay_model": fibre_delay_model})
+        ack_channel = ClassicalChannel("cl2", length=distance, models={"delay_model": fibre_delay_model})
 
 
-q_connection = DirectConnection("q_conn", channel_AtoB=channel_1, channel_BtoA=channel_2)
-loc_node.connect_to(remote_node=rem_node, connection=q_connection, local_port_name="qubitIO", remote_port_name="qubitIO")
+        q_connection = DirectConnection("q_conn", channel_AtoB=channel_1, channel_BtoA=channel_2)
+        loc_node.connect_to(remote_node=rem_node, connection=q_connection, local_port_name="qubitIO", remote_port_name="qubitIO")
 
-c_connection = DirectConnection("c_conn", channel_AtoB=cmd_channel, channel_BtoA=ack_channel)
-loc_node.connect_to(remote_node=rem_node, connection=c_connection, local_port_name="classicalIO", remote_port_name="classicalIO")
+        c_connection = DirectConnection("c_conn", channel_AtoB=cmd_channel, channel_BtoA=ack_channel)
+        loc_node.connect_to(remote_node=rem_node, connection=c_connection, local_port_name="classicalIO", remote_port_name="classicalIO")
 
-loc_pr = LocalPingPongProtocol(loc_node, [(m, 200) for m in range(10, 51, 10)])
-rem_pr = RemotePingPongProtocol(rem_node)
+        loc_pr = LocalBenchmarkingProtocol(loc_node, [(m, 1)])
+        rem_pr = RemoteBenchmarkingProtocol(rem_node)
 
-rem_pr.start()
-loc_pr.start()
-run_stats = ns.sim_run()
 
-print(loc_pr.results)
+        rem_pr.start()
+        loc_pr.start()
+        run_stats = ns.sim_run()
+
+        for tup in loc_pr.results:
+            cur = res_dict.get(tup[0], (0,0,0))
+            res_dict[tup[0]] = (cur[0]+tup[1], cur[1]+tup[2], cur[2]+tup[3])
+
+x_arr = list(res_dict.keys())
+y_arr = [res_dict[x][1] / res_dict[x][0] for x in x_arr]
+print(x_arr)
+print(y_arr)
+plt.plot(x_arr, y_arr)
+plt.show()
